@@ -569,8 +569,9 @@ class TlbAccessCheck(implicit p: Parameters) extends TlbModule with HasCSRConst 
   val ldPf = (ldPermFail || pf) && isLd
   val stPf = (stPermFail || pf) && isSt
   val instrPf = (instrPermFail || pf) && isInst
-  val isFakePte = !perm.v.get && !perm.pf && !perm.af && !onlyS2
-  val isNonLeaf = !(perm.r || perm.w || perm.x) && perm.v.get && !perm.pf && !perm.af
+  val isFakePte = !perm.v.get && !perm.pf && !onlyS2
+  val isNonLeaf = !(perm.r || perm.w || perm.x) && perm.v.get && !perm.pf
+  val s1_pmp_af = perm.af && !perm.v.get && !onlyS2
   val s1_valid = accessInfo.translateEnable && !onlyS2
 
   // Stage 2 perm check
@@ -589,22 +590,22 @@ class TlbAccessCheck(implicit p: Parameters) extends TlbModule with HasCSRConst 
   val fault_valid = s1_valid || s2_valid
 
   // when pf and gpf can't happens simultaneously
-  val hasPf = (ldPf || ldUpdate || stPf || stUpdate || instrPf || instrUpdate) && s1_valid && !af && !isFakePte && !isNonLeaf
+  val hasPf = (ldPf || ldUpdate || stPf || stUpdate || instrPf || instrUpdate) && s1_valid && !s1_pmp_af && !isFakePte && !isNonLeaf
   // isForVSnonLeafPTE is used only when gpf happens and it caused by a G-stage translation which supports VS-stage translation
   // it will be sent to CSR in order to modify the m/htinst.
   // Ref: The RISC-V Instruction Set Manual: Volume II: Privileged Architecture - 19.6.3. Transformed Instruction or Pseudoinstruction for mtinst or htinst
   val isForVSnonLeafPTE = isNonLeaf || isFakePte
   io.out.isForVSnonLeafPTE := isForVSnonLeafPTE
-  io.out.excp.pf.ld := (ldPf || ldUpdate) && s1_valid && !af && !isFakePte && !isNonLeaf
-  io.out.excp.pf.st := (stPf || stUpdate) && s1_valid && !af && !isFakePte && !isNonLeaf
-  io.out.excp.pf.instr := (instrPf || instrUpdate) && s1_valid && !af && !isFakePte && !isNonLeaf
-  // NOTE: pf need && with !af, page fault has higher priority than access fault
-  // but ptw may also have access fault, then af happens, the translation is wrong.
-  // In this case, pf has lower priority than af
+  io.out.excp.pf.ld := (ldPf || ldUpdate) && s1_valid && !s1_pmp_af && !isFakePte && !isNonLeaf
+  io.out.excp.pf.st := (stPf || stUpdate) && s1_valid && !s1_pmp_af && !isFakePte && !isNonLeaf
+  io.out.excp.pf.instr := (instrPf || instrUpdate) && s1_valid && !s1_pmp_af && !isFakePte && !isNonLeaf
+  // NOTE: Page fault has higher priority than ppn_af (PTE with PPN bits above physical address width).
+  // Only PTW memory access fault (pmp_af, where no valid PTE was fetched) has higher priority than pf.
 
-  io.out.excp.gpf.ld := (ldGpf || g_ldUpdate) && s2_valid && !af && !hasPf
-  io.out.excp.gpf.st := (stGpf || g_stUpdate) && s2_valid && !af && !hasPf
-  io.out.excp.gpf.instr := (instrGpf || g_instrUpdate) && s2_valid && !af && !hasPf
+  val hasGpf_cur = (ldGpf || g_ldUpdate || stGpf || g_stUpdate || instrGpf || g_instrUpdate) && s2_valid && !hasPf
+  io.out.excp.gpf.ld := (ldGpf || g_ldUpdate) && s2_valid && !s1_pmp_af && !hasPf
+  io.out.excp.gpf.st := (stGpf || g_stUpdate) && s2_valid && !s1_pmp_af && !hasPf
+  io.out.excp.gpf.instr := (instrGpf || g_instrUpdate) && s2_valid && !s1_pmp_af && !hasPf
 
   val mptValid = accessInfo.mptCheckOnly
   val mptPerm = io.in.mptPerm
@@ -612,11 +613,11 @@ class TlbAccessCheck(implicit p: Parameters) extends TlbModule with HasCSRConst 
   val mptWf = Option.when(HasMptCheck)(!(mptPerm.get.r && mptPerm.get.w) && isSt)
   val mptRf = Option.when(HasMptCheck)(!mptPerm.get.r && isLd)
   val mptAf = Option.when(HasMptCheck)(mptPerm.get.af.get)
-  io.out.excp.af.ld := (af && TlbCmd.isRead(cmd) && fault_valid) ||
+  io.out.excp.af.ld := (af && TlbCmd.isRead(cmd) && fault_valid && !hasPf && !hasGpf_cur) ||
     (if (HasMptCheck) ((mptRf.get || (mptAf.get && TlbCmd.isRead(cmd))) && mptValid.get) else false.B)
-  io.out.excp.af.st := (af && TlbCmd.isWrite(cmd) && fault_valid) ||
+  io.out.excp.af.st := (af && TlbCmd.isWrite(cmd) && fault_valid && !hasPf && !hasGpf_cur) ||
     (if (HasMptCheck) ((mptWf.get || (mptAf.get && TlbCmd.isWrite(cmd))) && mptValid.get) else false.B)
-  io.out.excp.af.instr := (af && TlbCmd.isExec(cmd) && fault_valid) ||
+  io.out.excp.af.instr := (af && TlbCmd.isExec(cmd) && fault_valid && !hasPf && !hasGpf_cur) ||
     (if (HasMptCheck) ((mptInstf.get || (mptAf.get && TlbCmd.isExec(cmd))) && mptValid.get) else false.B)
 
   io.out.excp.vaNeedExt := true.B
